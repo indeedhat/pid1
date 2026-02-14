@@ -1,7 +1,14 @@
 # PID1
 This repo contains a learning project into handling PID1.
 
-Its basically my own implementation of [tiny](https://github.com/krallin/tini) written in go, if you are actually looking for a production quality tool you should probably go with [tiny](https://github.com/krallin/tini).
+Its basically my own implementation of [tiny](https://github.com/krallin/tini) written in go,
+I have also added the functionality to run supplimentary processes,
+but if you are actually looking for a production quality tool you should probably go with [tiny](https://github.com/krallin/tini).
+
+### Features
+- signal forwarding
+- orphan process reaping
+- optional supplimentary services
 
 ### Usage
 ```console
@@ -16,6 +23,10 @@ Usage:
 Options:
     -h, -help
         Show help message
-    -adopt
-        Adopt child processes after the main process exits (default true)
+    -orphan-policy
+        Set the policy for handling orphan processes [adopt, kill] (default adopt)
+
+Environment Variables:
+    PID1_ADITIONAL_SERVICES
+        path to a icl config file specifying aditional services to run along side the main process
 ```

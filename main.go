@@ -31,8 +31,8 @@ Usage:
 Options:
     -h, -help
         Show help message
-    -adopt
-        Adopt child processes after the main process exits (default true)
+    -orphan-policy
+        Set the policy for handling orphan processes [adopt, kill] (default adopt)
 
 Environment Variables:
     PID1_ADITIONAL_SERVICES

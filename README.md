@@ -30,3 +30,6 @@ Environment Variables:
     PID1_ADITIONAL_SERVICES
         path to a icl config file specifying aditional services to run along side the main process
 ```
+
+### Todo
+test coverage is pretty minimal, im only really testing happy paths and i have no testing for supplimentary services

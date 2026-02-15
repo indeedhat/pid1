@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/davecgh/go-spew/spew"
 	"golang.org/x/sys/unix"
 )
 
@@ -146,24 +145,19 @@ func (p *prefixWriter) Write(data []byte) (int, error) {
 
 func bootAditionalServices(mainPid int, p1Conf *pid1Config, svcConf *AditionalServices) error {
 	if svcConf == nil {
-		spew.Dump("no config")
 		return nil
 	}
 
 	for _, svc := range svcConf.Services {
-		spew.Dump("booting " + svc.Name)
-
 		if svc.Critical && svc.AutoRestart {
 			_ = syscall.Kill(mainPid, syscall.SIGTERM)
 			_ = syscall.Kill(-mainPid, syscall.SIGTERM)
-			spew.Dump("bad critical")
 			return fmt.Errorf("critical service '%s' cannot have an auto_restart policy", svc.Name)
 		}
 
 		if !isExecutable(svc.Command) {
 			_ = syscall.Kill(mainPid, syscall.SIGTERM)
 			_ = syscall.Kill(-mainPid, syscall.SIGTERM)
-			spew.Dump("not executable")
 			return fmt.Errorf("cannot find an executable command for svc %s", svc.Name)
 		}
 
@@ -178,9 +172,7 @@ func bootAditionalServices(mainPid int, p1Conf *pid1Config, svcConf *AditionalSe
 				}
 
 				if svc.CaptureOutput {
-					spew.Dump("capturing output for " + svc.Name)
 					if svc.CapturePrefix {
-						spew.Dump("with prefix " + svc.Name)
 						cmd.Stdout = &prefixWriter{svc.Name, p1Conf.stdout}
 						cmd.Stderr = &prefixWriter{svc.Name, p1Conf.stderr}
 					} else {
@@ -189,17 +181,15 @@ func bootAditionalServices(mainPid int, p1Conf *pid1Config, svcConf *AditionalSe
 					}
 				}
 
-				spew.Dump("cmd err ", cmd.Run())
+				cmd.Run()
 
 				if svc.Critical {
-					spew.Dump("critical" + svc.Name)
 					_ = syscall.Kill(mainPid, syscall.SIGTERM)
 					_ = syscall.Kill(-mainPid, syscall.SIGTERM)
 					return
 				}
 
 				if !svc.AutoRestart {
-					spew.Dump("no restart" + svc.Name)
 					return
 				}
 			}

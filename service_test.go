@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,16 +87,25 @@ func TestCriticalService(t *testing.T) {
 }
 
 func TestCaptureServiceOutput(t *testing.T) {
+	rout, wout, _ := os.Pipe()
+	rerr, werr, _ := os.Pipe()
+
 	var stdoutBuf bytes.Buffer
 	var stderrBuf bytes.Buffer
+
 	conf := &pid1Config{
 		sigCh:  make(chan os.Signal, 1),
 		stdin:  bytes.NewReader(nil),
-		stdout: &stdoutBuf,
-		stderr: &stderrBuf,
+		stdout: wout,
+		stderr: werr,
 	}
 
 	done := make(chan runResponse, 1)
+
+	go func() {
+		io.Copy(&stdoutBuf, rout)
+	}()
+	go io.Copy(&stderrBuf, rerr)
 
 	go func() {
 		os.Setenv("PID1_ADITIONAL_SERVICES", "./fixtures/capture-output.icl")
@@ -116,8 +125,8 @@ func TestCaptureServiceOutput(t *testing.T) {
 		require.Nil(t, resp.err)
 		require.Equal(t, 0, resp.code)
 
-		spew.Dump(stdoutBuf.String(), stderrBuf.String())
-		t.Fatal("cos")
+		require.Equal(t, stdoutBuf.String(), "stdout data from non-prefixed\n[prefixed] stdout data from prefixed\n")
+		require.Equal(t, stderrBuf.String(), "stderr data from non-prefixed\n[prefixed] stderr data from prefixed\n")
 
 	case <-time.After(11 * time.Second):
 		t.Fatal("timout reached waiting for run to exit")

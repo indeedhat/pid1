@@ -1,15 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,10 +57,9 @@ var runTestCases = []struct {
 func TestRun(t *testing.T) {
 	for _, testCase := range runTestCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			sigCh := make(chan os.Signal, 1)
-			code, err := run(testCase.args, sigCh)
+			conf := defaultP1TestConf()
+			code, err := run(testCase.args, conf)
 
-			spew.Dump(code, err)
 			require.Equal(t, testCase.expectedError, err)
 			require.Equal(t, testCase.expectedCode, code)
 		})
@@ -73,17 +72,17 @@ type runResponse struct {
 }
 
 func TestRunSigtermFormard(t *testing.T) {
-	sigCh := make(chan os.Signal, 1)
+	conf := defaultP1TestConf()
 	done := make(chan runResponse, 1)
 
 	go func() {
-		code, err := run([]string{"./fixtures/signal_forward.sh"}, sigCh)
+		code, err := run([]string{"./fixtures/signal_forward.sh"}, conf)
 		done <- runResponse{code, err}
 	}()
 
 	time.Sleep(500 * time.Millisecond)
 
-	sigCh <- syscall.SIGTERM
+	conf.sigCh <- syscall.SIGTERM
 
 	select {
 	case resp := <-done:
@@ -95,11 +94,11 @@ func TestRunSigtermFormard(t *testing.T) {
 }
 
 func TestRunOrphanReaping(t *testing.T) {
-	sigCh := make(chan os.Signal, 1)
+	conf := defaultP1TestConf()
 	done := make(chan runResponse, 1)
 
 	go func() {
-		code, err := run([]string{"-orphan-policy", "kill", "./fixtures/orphan.sh"}, sigCh)
+		code, err := run([]string{"-orphan-policy", "kill", "./fixtures/orphan.sh"}, conf)
 		done <- runResponse{code, err}
 	}()
 
@@ -108,14 +107,55 @@ func TestRunOrphanReaping(t *testing.T) {
 		require.Nil(t, resp.err)
 		require.Equal(t, 0, resp.code)
 
-		ps := exec.Command("ps", "-ef")
-		out, err := ps.Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		require.NotContains(t, "sleep 10", string(out))
+		running, err := isProcRunning("sleep 10")
+		require.Nil(t, err)
+		require.False(t, running, "sleep 10 is still running")
 
 	case <-time.After(5 * time.Second):
 		t.Fatal("timout reached waiting for run to exit")
+	}
+}
+
+func isProcRunning(cmd string) (bool, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false, err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		pid := entry.Name()
+		if _, err := strconv.Atoi(pid); err != nil {
+			continue
+		}
+
+		cmdlinePath := filepath.Join("/proc", pid, "cmdline")
+		data, err := os.ReadFile(cmdlinePath)
+		if err != nil {
+			continue
+		}
+
+		cmdline := bytes.ReplaceAll(data, []byte{0}, []byte{' '})
+
+		if bytes.Contains(cmdline, []byte(cmd)) {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func defaultP1TestConf() *pid1Config {
+	stdout := []byte{}
+	stderr := []byte{}
+
+	return &pid1Config{
+		sigCh:  make(chan os.Signal, 1),
+		stdin:  bytes.NewReader(nil),
+		stdout: bytes.NewBuffer(stdout),
+		stderr: bytes.NewBuffer(stderr),
 	}
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,8 +11,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
-	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"golang.org/x/sys/unix"
 )
 
@@ -45,19 +44,31 @@ const (
 	orphanKill  = "kill"
 )
 
-type Options struct {
+type options struct {
 	OrphanPolicy string
 }
 
 var (
-	opts = Options{}
+	opts = options{}
 )
+
+type pid1Config struct {
+	sigCh  chan os.Signal
+	stdin  io.Reader
+	stdout io.Writer
+	stderr io.Writer
+}
 
 func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh)
 
-	code, err := run(os.Args[1:], sigCh)
+	code, err := run(os.Args[1:], &pid1Config{
+		sigCh:  sigCh,
+		stdin:  os.Stdin,
+		stdout: os.Stdout,
+		stderr: os.Stderr,
+	})
 	if err != nil {
 		fmt.Fprint(os.Stderr, err)
 	}
@@ -65,37 +76,34 @@ func main() {
 	os.Exit(code)
 }
 
-func run(args []string, sigCh <-chan os.Signal) (int, error) {
+func run(args []string, p1Conf *pid1Config) (int, error) {
 	args, err := parseOpts(args)
 	if err != nil {
 		return 1, err
 	}
 
-	conf, err := loadConfig()
+	svcConf, err := loadConfig()
 	if err != nil {
 		return 1, fmt.Errorf("Failed to load config: %s", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if err := bootAditionalServices(cancel, conf); err != nil {
-		return 1, fmt.Errorf("Failed to boot aditional services: %s", err)
 	}
 
 	if err := initSubReaper(); err != nil {
 		return 1, err
 	}
 
-	childPid, err := spawnChild(args)
+	childPid, err := spawnChild(args, p1Conf)
 	if err != nil {
 		// NB: this is a bit hacky, in the case of an error childPid is actually the error code
 		return childPid, fmt.Errorf("failed to spawn child process: %s", err)
 	}
 
-	go forwardSignals(childPid, sigCh)
+	if err := bootAditionalServices(childPid, p1Conf, svcConf); err != nil {
+		return 1, fmt.Errorf("Failed to boot aditional services: %s", err)
+	}
 
-	return waitAndReap(ctx, childPid), nil
+	go forwardSignals(childPid, p1Conf.sigCh)
+
+	return waitAndReap(childPid), nil
 }
 
 func parseOpts(args []string) ([]string, error) {
@@ -136,14 +144,27 @@ func (p *prefixWriter) Write(data []byte) (int, error) {
 	return len(data), scanner.Err()
 }
 
-func bootAditionalServices(cancel context.CancelFunc, conf *AditionalServices) error {
-	if conf == nil {
+func bootAditionalServices(mainPid int, p1Conf *pid1Config, svcConf *AditionalServices) error {
+	if svcConf == nil {
+		spew.Dump("no config")
 		return nil
 	}
 
-	for _, svc := range conf.Services {
+	for _, svc := range svcConf.Services {
+		spew.Dump("booting " + svc.Name)
+
 		if svc.Critical && svc.AutoRestart {
+			_ = syscall.Kill(mainPid, syscall.SIGTERM)
+			_ = syscall.Kill(-mainPid, syscall.SIGTERM)
+			spew.Dump("bad critical")
 			return fmt.Errorf("critical service '%s' cannot have an auto_restart policy", svc.Name)
+		}
+
+		if !isExecutable(svc.Command) {
+			_ = syscall.Kill(mainPid, syscall.SIGTERM)
+			_ = syscall.Kill(-mainPid, syscall.SIGTERM)
+			spew.Dump("not executable")
+			return fmt.Errorf("cannot find an executable command for svc %s", svc.Name)
 		}
 
 		go func() {
@@ -153,25 +174,32 @@ func bootAditionalServices(cancel context.CancelFunc, conf *AditionalServices) e
 				cmd := exec.Command(svc.Command, svc.Args...)
 				cmd.SysProcAttr = &syscall.SysProcAttr{
 					Setpgid: true,
-					Pgid:    0,
+					Pgid:    mainPid,
 				}
+
 				if svc.CaptureOutput {
+					spew.Dump("capturing output for " + svc.Name)
 					if svc.CapturePrefix {
-						cmd.Stdout = &prefixWriter{svc.Name, os.Stdout}
-						cmd.Stderr = &prefixWriter{svc.Name, os.Stderr}
+						spew.Dump("with prefix " + svc.Name)
+						cmd.Stdout = &prefixWriter{svc.Name, p1Conf.stdout}
+						cmd.Stderr = &prefixWriter{svc.Name, p1Conf.stderr}
 					} else {
-						cmd.Stdout = os.Stdout
-						cmd.Stderr = os.Stderr
+						cmd.Stdout = p1Conf.stdout
+						cmd.Stderr = p1Conf.stderr
 					}
 				}
 
-				cmd.Run()
+				spew.Dump("cmd err ", cmd.Run())
+
 				if svc.Critical {
-					cancel()
+					spew.Dump("critical" + svc.Name)
+					_ = syscall.Kill(mainPid, syscall.SIGTERM)
+					_ = syscall.Kill(-mainPid, syscall.SIGTERM)
 					return
 				}
 
 				if !svc.AutoRestart {
+					spew.Dump("no restart" + svc.Name)
 					return
 				}
 			}
@@ -190,7 +218,7 @@ func forwardSignals(pid int, ch <-chan os.Signal) {
 	}
 }
 
-func spawnChild(argv []string) (int, error) {
+func spawnChild(argv []string, p1Conf *pid1Config) (int, error) {
 	// spawn command in its own process group
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -198,9 +226,9 @@ func spawnChild(argv []string) (int, error) {
 		Pgid:    0,
 	}
 
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdin = p1Conf.stdin
+	cmd.Stdout = p1Conf.stdout
+	cmd.Stderr = p1Conf.stderr
 
 	if err := cmd.Start(); err != nil {
 		if errno, ok := err.(*os.PathError); ok {
@@ -226,47 +254,37 @@ func initSubReaper() error {
 	return nil
 }
 
-func waitAndReap(ctx context.Context, mainPid int) int {
+func waitAndReap(mainPid int) int {
 	var (
 		exitCode   int
 		mainExited bool
 	)
 
-outer:
 	for {
-		select {
-		case <-ctx.Done():
+		var status syscall.WaitStatus
+		pid, err := syscall.Wait4(-1, &status, 0, nil)
+
+		if err != nil {
+			if err == syscall.ECHILD {
+				break
+			}
+			continue
+		}
+
+		if pid != mainPid {
+			continue
+		}
+
+		mainExited = true
+
+		if status.Exited() {
+			exitCode = status.ExitStatus()
+		} else if status.Signaled() {
+			exitCode = 128 + int(status.Signal())
+		}
+
+		if opts.OrphanPolicy == orphanKill {
 			syscall.Kill(-mainPid, syscall.SIGTERM)
-			time.Sleep(2 * time.Second)
-			syscall.Kill(-mainPid, syscall.SIGKILL)
-			break outer
-
-		default:
-			var status syscall.WaitStatus
-			pid, err := syscall.Wait4(-1, &status, 0, nil)
-
-			if err != nil {
-				if err == syscall.ECHILD {
-					break outer
-				}
-				continue outer
-			}
-
-			if pid != mainPid {
-				continue
-			}
-
-			mainExited = true
-
-			if status.Exited() {
-				exitCode = status.ExitStatus()
-			} else if status.Signaled() {
-				exitCode = 128 + int(status.Signal())
-			}
-
-			if opts.OrphanPolicy == orphanKill {
-				syscall.Kill(-mainPid, syscall.SIGTERM)
-			}
 		}
 	}
 
@@ -275,4 +293,20 @@ outer:
 	}
 
 	return exitCode
+}
+
+func isExecutable(cmd string) bool {
+	_, err := exec.LookPath(cmd)
+	if err == nil {
+		return true
+	}
+
+	stat, err := os.Stat(cmd)
+	if err != nil {
+		return false
+	}
+
+	mode := stat.Mode()
+
+	return !mode.IsDir() && mode&0111 != 0
 }

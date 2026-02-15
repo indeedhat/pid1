@@ -32,4 +32,5 @@ Environment Variables:
 ```
 
 ### Todo
-test coverage is pretty minimal, im only really testing happy paths and i have no testing for supplimentary services
+- need beeter test coverage
+- need a cleanup pass as ive been hacking onto things
